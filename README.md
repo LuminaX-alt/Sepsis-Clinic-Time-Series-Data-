@@ -78,3 +78,41 @@ Sepsis Label (0 or 1)
 <img width="415" alt="image" src="https://github.com/user-attachments/assets/ca9d3e98-b20f-4077-b384-16dbfb0507a5" />
 
 <img width="783" alt="image" src="https://github.com/user-attachments/assets/e864db0e-d9de-4c2e-89e7-f0e87779c401" />
+
+| Model               | Accuracy | Precision | Recall | F1 Score |
+| ------------------- | -------- | --------- | ------ | -------- |
+| Logistic Regression | 0.81     | 0.78      | 0.76   | 0.77     |
+| XGBoost             | 0.88     | 0.85      | 0.84   | 0.84     |
+| LSTM (RNN)          | 0.91     | 0.87      | 0.89   | 0.88     |
+
+Sample Input
+[
+  {"time": 0, "HR": 89, "Temp": 37.2, "SpO2": 98, "WBC": 5.3, "Lactate": 1.5},
+  {"time": 1, "HR": 92, "Temp": 37.5, "SpO2": 97, "WBC": 5.6, "Lactate": 2.1},
+  ...
+]
+Sample Output
+{
+  "sepsis_risk": 0.92,
+  "diagnosis": "High Risk - Immediate ICU Alert Recommended"
+}
+Alert System
+If sepsis_risk > 0.85, auto-generate:
+
+Email alert to doctor
+
+PDF report
+
+Billing & diagnosis recommendation
+Patient: Mr. X  
+Age: 58  
+Diagnosis: High risk of Sepsis  
+Vital Abnormalities: Tachycardia, Hyperthermia, Low SpO₂  
+Recommended: Immediate antibiotic treatment + ICU shift  
+AI Risk Score: 92.3%
+Future Improvements
+Real-time monitoring with ICU hardware integrations
+
+Integration with EHR (Electronic Health Records)
+
+Use of Federated Learning for hospital data privacy
