@@ -1,0 +1,227 @@
+# Imports required to access datathon data
+from google.colab import auth
+from google.cloud import bigquery
+import os
+
+# Feel free to import other libraries
+import tensorflow as tf
+import seaborn as sns
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+auth.authenticate_user()
+project_id='hack-aotearoa'
+os.environ["GOOGLE_CLOUD_PROJECT"]=project_id
+
+
+# Returns a dataframe given query string as input. 
+def run_query(query):
+  return pd.io.gbq.read_gbq(query, project_id=project_id, configuration={'query':{'useLegacySql': False}}, dialect = 'legacy')
+  example_query = '''
+SELECT *
+FROM `physionet-data.mimiciii_clinical.patients` p
+LIMIT 100
+'''
+
+run_query(example_query).head(10)
+age_query = '''
+SELECT i.icustay_id, p.gender, DATETIME_DIFF(i.intime, p.dob, YEAR) AS age 
+FROM `physionet-data.mimiciii_clinical.icustays` i
+INNER JOIN `physionet-data.mimiciii_clinical.patients` p
+ON i.subject_id = p.subject_id'''
+
+age_df = run_query(age_query)
+age_df.age.hist(bins = np.arange(18, 310, 1))
+# hint: use the icustay_detail and angus_sepsis tables in the mimiciii_derived database
+
+cohort_query = '''
+SELECT i.subject_id, i.hadm_id, i.icustay_id, i.gender, i.admission_age, i.hospital_expire_flag, i.intime, i.icustay_seq
+FROM `physionet-data.mimiciii_derived.icustay_detail` i
+INNER JOIN `physionet-data.mimiciii_derived.angus_sepsis` a
+ON a.hadm_id = i.hadm_id AND a.explicit_sepsis = 1
+WHERE i.admission_age >= 18 AND i.admission_age < 89 AND i.los_icu >= 2
+'''
+
+
+cohort = run_query(cohort_query)
+
+cohort = cohort.replace({'gender': {'F': 0, 
+                                    'M': 1}})
+
+
+cohort.head(10)
+cohort_stats = cohort.groupby('hospital_expire_flag').agg({'icustay_id': 'nunique', 'gender': 'mean', 'admission_age': ['mean', 'std']})
+cohort_stats.loc['tot'] = cohort.agg({'icustay_id': 'nunique', 'gender': 'mean', 'admission_age': ['mean', 'std']}).stack().swaplevel()
+
+cohort_stats
+# Use the table `physionet-data.mimiciii_clinical.chartevents`
+# hint: use table d_items and SQL function LIKE to find variables.
+# hint: to keep only observations from the first 48 hours use the function DATETIME_DIFF with ICU intime.
+
+
+vitals_query = '''
+WITH cohort AS(
+SELECT i.subject_id, i.hadm_id, i.icustay_id, i.gender, i.admission_age, i.hospital_expire_flag, i.intime
+FROM `physionet-data.mimiciii_derived.icustay_detail` i
+INNER JOIN `physionet-data.mimiciii_derived.angus_sepsis` a
+ON a.hadm_id = i.hadm_id AND a.explicit_sepsis = 1
+WHERE i.admission_age >= 18 AND i.admission_age < 89 AND i.los_icu >= 2
+)
+, vitals AS(
+SELECT c.subject_id, c.hadm_id, c.icustay_id, c.charttime, DATETIME_DIFF(c.charttime, i.intime, MINUTE)/60 AS delta, 
+CASE 
+  WHEN c.itemid IN (223761, 678, 679) THEN (c.valuenum - 32)*(5/9) ELSE c.valuenum END AS valuenum, 
+CASE 
+	WHEN c.itemid IN (51, 442, 455, 6701, 220179, 220050)         THEN 'SBP'
+  WHEN c.itemid IN (8368, 8440, 8441, 8555, 220180, 220051)     THEN 'DBP'
+  WHEN c.itemid IN (618, 615, 220210, 224690)                   THEN 'RSP'
+  WHEN c.itemid IN (223762, 676, 223761, 678, 677, 679)         THEN 'TMP'
+  WHEN c.itemid IN (211, 220045)                                THEN 'HR'
+  WHEN c.itemid IN (646, 22027)                                 THEN 'SpO2'
+  ELSE NULL
+  END AS type
+FROM `physionet-data.mimiciii_clinical.chartevents` c
+INNER JOIN cohort i
+ON i.icustay_id = c.icustay_id 
+WHERE DATETIME_DIFF(c.charttime, i.intime, MINUTE)/60 <= 48
+ORDER BY c.subject_id, c.hadm_id, c.icustay_id, c.charttime)
+SELECT *
+FROM vitals v
+WHERE v.type IS NOT NULL
+'''
+
+vitals = run_query(vitals_query)
+vitals.head(10)
+# hint: lab tests are not associated to the icustay_id but to the hadm_id, filter values based on ICU admission time (intime)
+
+lab_query = '''
+WITH cohort AS(
+SELECT i.subject_id, i.hadm_id, i.icustay_id, i.gender, i.admission_age, i.hospital_expire_flag, i.intime
+FROM `physionet-data.mimiciii_derived.icustay_detail` i
+INNER JOIN `physionet-data.mimiciii_derived.angus_sepsis` a
+ON a.hadm_id = i.hadm_id AND a.explicit_sepsis = 1
+WHERE i.admission_age >= 18 AND i.admission_age < 89 AND i.los_icu >= 2
+)
+SELECT l.*, DATETIME_DIFF(l.charttime, i.intime, MINUTE)/60 AS delta, i.icustay_id
+FROM `physionet-data.mimiciii_derived.pivoted_lab` l
+INNER JOIN cohort i 
+ON i.hadm_id = l.hadm_id 
+WHERE DATETIME_DIFF(l.charttime, i.intime, MINUTE)/60 >= -6 AND DATETIME_DIFF(l.charttime, i.intime, MINUTE)/60 <= 48
+ORDER BY l.subject_id, l.hadm_id, i.icustay_id, l.charttime
+'''
+
+lab = run_query(lab_query)
+lab.head(10)
+# hint: use the pivoted_gcs in mimiciii_derived
+
+gcs_query = '''
+WITH cohort AS(
+SELECT i.subject_id, i.hadm_id, i.icustay_id, i.gender, i.admission_age, i.hospital_expire_flag, i.intime
+FROM `physionet-data.mimiciii_derived.icustay_detail` i
+INNER JOIN `physionet-data.mimiciii_derived.angus_sepsis` a
+ON a.hadm_id = i.hadm_id AND a.explicit_sepsis = 1
+WHERE i.admission_age >= 18 AND i.admission_age < 89 AND i.los_icu >= 2
+)
+SELECT l.*, i.subject_id, i.hadm_id, DATETIME_DIFF(l.charttime, i.intime, MINUTE)/60 AS delta
+FROM `physionet-data.mimiciii_derived.pivoted_gcs` l
+INNER JOIN cohort i 
+ON i.icustay_id = l.icustay_id 
+WHERE DATETIME_DIFF(l.charttime, i.intime, MINUTE)/60 >= -6 AND DATETIME_DIFF(l.charttime, i.intime, MINUTE)/60 <= 48
+ORDER BY i.subject_id, i.hadm_id, i.icustay_id, l.charttime'''
+
+gcs = run_query(gcs_query)
+gcs.head(10)
+p_gcs = gcs.set_index(['subject_id','hadm_id','icustay_id','charttime','delta']).stack().reset_index().rename({0: 'valuenum', 'level_5': 'type'}, axis = 1) # stacking the gcs table 
+p_lab = lab.set_index(['subject_id','hadm_id','icustay_id','charttime','delta']).stack().reset_index().rename({0: 'valuenum', 'level_5': 'type'}, axis = 1) # stacking lab 
+
+t0 = pd.concat([vitals, p_gcs, p_lab], axis = 0, sort = True) # now that gcs and lab have the same format as vitals, we can concatenate the theree tables along the rows.
+ts_df = pd.pivot_table(t0, index = ['icustay_id', 'delta'], values = 'valuenum', columns = 'type') # applying the pivot operator.
+ts_df = ts_df.reset_index()
+ts_df['MAP'] = (ts_df['SBP'] + 2*ts_df['DBP'])/3 # combining features in this format is far easier, for example we can compute the mean arterial pressure easily.
+ts_df.head(10)
+ts_df.loc[ts_df.icustay_id == 200030, ['delta','MAP', 'HR', 'RSP','TMP','SpO2']].plot(x = 'delta', grid = {'alpha': .3})
+ds = ts_df.drop('delta', axis = 1).groupby('icustay_id').agg(['mean','std']) 
+ds = ds.merge(cohort[['icustay_id', 'admission_age', 'gender','hospital_expire_flag']], on = 'icustay_id').rename({'hospital_expire_flag': 'outcome'}, axis = 1).set_index('icustay_id')
+
+ds.head(10)
+# useful libraries
+
+from sklearn.model_selection import train_test_split, RandomizedSearchCV, GridSearchCV
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+import sklearn.metrics as mtr
+# useful functions
+
+
+# Plots roc curve
+def plot_roc(y_true, y_proba, pos_class = 1):
+  fpr, tpr, _ = mtr.roc_curve(y_true, y_proba[:,pos_class])
+  auc = mtr.auc(fpr, tpr)
+  
+  fig, ax = plt.subplots()
+  ax.plot(fpr, tpr)
+  ax.plot([0,1], [0, 1], color = 'k', linestyle = '--', alpha = .3)
+  ax.text(.5, .5, 'AUC: {:.2f}'.format(auc), fontweight = 'bold', ha = 'center')
+  
+  ax.grid(alpha = .3)
+  ax.set_xlim([0,1])
+  ax.set_ylim([0,1])
+  ax.set_xlabel('FPR')
+  ax.set_ylabel('TPR')
+  # Split train and test set in  75%/25% 
+
+X, y = ds.drop('outcome', axis = 1), ds.outcome
+X_train, X_test, y_train, y_test = train_test_split(X, y, random_state = 0, test_size = .25, stratify = y)
+
+# Logistic Regression 
+
+clf_lr = Pipeline([
+    ('si', SimpleImputer()),
+    ('sd', StandardScaler()),
+    ('lr', LogisticRegression(random_state = 0))
+])
+
+clf_lr.fit(X_train, y_train)
+y_prob = clf_lr.predict_proba(X_test)
+plot_roc(y_test, y_prob)
+y_pred = clf_lr.predict(X_test)
+print(mtr.classification_report(y_test, y_pred))
+odds = np.exp(clf_lr.steps[2][1].coef_)
+
+feat_names = [val[0] + val[1] for val in ds.drop('outcome', axis = 1).columns]
+feat_df = pd.DataFrame({'feature': feat_names, 'odds': odds[0]}).sort_values(by = 'odds', ascending = False)
+
+fig, ax = plt.subplots(figsize = (20, 10))
+feat_df.plot.bar(x = 'feature', ax = ax)
+ax.plot(ax.get_xlim(), [1,1], color = 'k', linestyle = '--', linewidth = 2)
+# Random Forest
+
+clf_rf = Pipeline([
+    ('si', SimpleImputer()),
+    ('rf', RandomForestClassifier(random_state = 0))
+])
+
+random_param = {
+    'rf__n_estimators': np.arange(100, 1000, 100),
+    'rf__max_depth': [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, None],
+    'rf__max_features': ['auto', 'sqrt'],
+    'rf__min_samples_leaf': [1, 2, 4],
+    'rf__min_samples_split': [2, 5, 10]
+}
+
+rs = RandomizedSearchCV(clf_rf, random_param, random_state = 0, cv = 10, 
+                        n_iter = 10, n_jobs = -1)
+rs.fit(X_train, y_train)
+y_prob = rs.best_estimator_.predict_proba(X_test)
+plot_roc(y_test, y_prob)
+y_pred = rs.best_estimator_.predict(X_test)
+print(mtr.classification_report(y_test, y_pred))
+rank = rs.best_estimator_.steps[1][1].feature_importances_
+rf_rank = pd.DataFrame({'feature': feat_names, 'rank': rank}).sort_values(by = 'rank', ascending = False)
+
+
+fig, ax = plt.subplots(figsize = (20, 10))
+rf_rank.plot.bar(x = 'feature', ax = ax)
